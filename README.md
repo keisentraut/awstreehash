@@ -2,7 +2,7 @@
 
 This is a simple, fast and small command line tool to calculate a Amazon AWS Glacier SHA256 Tree Hash.
 See [http://docs.aws.amazon.com/amazonglacier/latest/dev/checksum-calculations.html](http://docs.aws.amazon.com/amazonglacier/latest/dev/checksum-calculations.html) for the documentation of the hash format.
-The only dependency is libcrypto from OpenSSL or its variant.
+The only dependency is libcrypto from OpenSSL or one of its variants like LibreSSL.
 
 # Compiling
 ```
