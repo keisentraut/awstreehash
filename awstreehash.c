@@ -1,7 +1,7 @@
 /** awstreehash.c - Tool to calculate SHA256 Tree-Hash as used in AWS Glacier
  *
  * Copyright ©February 2017, Klaus Eisentraut
- * 
+ *
  * This work is free. You can redistribute it and/or modify it under the
  * terms of the Do What The Fuck You Want To Public License, Version 2,
  * as published by Sam Hocevar. See http://www.wtfpl.net/ for more details.
@@ -16,9 +16,9 @@
 
 const size_t BLOCKSIZE = 1024*1024;
 
-// linked list which is used to store the SHA256 hashes of the intermediate chunks 
+// linked list which is used to store the SHA256 hashes of the intermediate chunks
 struct Chunk {
-	void *digest;	
+	void *digest;
 	struct Chunk *nextChunk;
 };
 
@@ -32,7 +32,7 @@ void printBinaryAsHex(const unsigned char* s, size_t len) {
 void* safeCalloc(size_t n, size_t size) {
 	void *p = calloc(n, size);
 	if (p == NULL) {
-		fputs("out of memory\n", stderr);
+		fputs("out of memory", stderr);
 		exit(EXIT_FAILURE);
 	}
 	return p;
@@ -71,12 +71,11 @@ void printChunks(struct Chunk* startChunk) {
 
 void* awsTreeHash(FILE* input)
 {
-	void *result = safeCalloc(1, SHA256_DIGEST_LENGTH);
 
 	struct Chunk *startChunk = allocAndInitChunk();
 	struct Chunk *previousChunk = NULL;
 	struct Chunk *currentChunk = startChunk;
-	void *buffer = safeCalloc(1, BLOCKSIZE); 
+	void *buffer = safeCalloc(1, BLOCKSIZE);
 
 	size_t alreadyRead = 0;
 	int n;
@@ -88,8 +87,12 @@ void* awsTreeHash(FILE* input)
 		if (ferror(input)) {
 			// some kind of read error.
 			perror("error");
-			free(result);
-			return NULL;			
+
+			// cleanup
+			free(buffer);
+			while ( (startChunk = freeChunk(startChunk)) != NULL) { };
+
+			return NULL;
 		}
 		alreadyRead += n;
 		SHA256_Update(&ctx, buffer, n);
@@ -104,21 +107,21 @@ void* awsTreeHash(FILE* input)
 			// advance in linked list
 			previousChunk = currentChunk;
 			currentChunk->nextChunk = allocAndInitChunk();
-			currentChunk = currentChunk->nextChunk;			
+			currentChunk = currentChunk->nextChunk;
 		}
 	};
 	free(buffer);
 	SHA256_Final(currentChunk->digest, &ctx);
 
 	// we have to consider one special case
-	// if we read data with a length of exactly n * 1 MiB, the last chunk hash 
+	// if we read data with a length of exactly n * 1 MiB, the last chunk hash
 	// is the hash of an empty input and must be removed from list of chunks.
 	// it doesn't matter for empty input, though
 	if (startChunk != currentChunk && alreadyRead == 0) {
 		freeChunk(currentChunk);
 		previousChunk->nextChunk = NULL;
 	}
-			
+
 
 	while (startChunk->nextChunk != NULL) { // concat chunks as long as there is only one left
 		// start a new chain which will replace the old chain later on
@@ -137,7 +140,7 @@ void* awsTreeHash(FILE* input)
 				SHA256_Update(&ctx, currentChunkOld->digest, SHA256_DIGEST_LENGTH);
 				currentChunkOld = freeChunk(currentChunkOld);
 				SHA256_Final(currentChunkNew->digest, &ctx);
-				if (currentChunkOld == NULL) { 
+				if (currentChunkOld == NULL) {
 					currentChunkNew->nextChunk = NULL;
 				} else {
 					// there is at least one more left, so we need another element in the new list
@@ -154,6 +157,7 @@ void* awsTreeHash(FILE* input)
 		startChunk = startChunkNew;
 	};
 
+	void *result = safeCalloc(1, SHA256_DIGEST_LENGTH);
 	memcpy(result, startChunk->digest, SHA256_DIGEST_LENGTH);
 	freeChunk(startChunk);
 	return result;
@@ -163,7 +167,7 @@ void hashStdin()
 {
 	void *result = awsTreeHash(stdin);
 	if (result == NULL) {
-		fprintf(stderr, "error: while reading from stdin");
+		fputs("error: while reading from stdin", stderr);
 	} else {
 		printBinaryAsHex(result, SHA256_DIGEST_LENGTH);
 		puts("  -");
@@ -185,7 +189,7 @@ void hashFile(const char *filename)
 	fclose(fp);
 
 	if (result == NULL) {
-		fprintf(stderr, "error: while reading from file %s", filename);
+		fprintf(stderr, "error: while reading from file %s\n", filename);
 	} else {
 		printBinaryAsHex(result, SHA256_DIGEST_LENGTH);
 		printf("  %s\n", filename);
@@ -207,7 +211,7 @@ int main(int argc, char* argv[]) {
 					hashStdin();
 					stdinDone = 1;
 				}
-			} 
+			}
 			else {
 				hashFile(argv[i]);
 			}
