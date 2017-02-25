@@ -13,13 +13,13 @@
 
 #include <openssl/sha.h>
 
-
-const size_t BLOCKSIZE = 1024*1024;
+// AWS uses a fixed CHUNKSIZE of 1 MiB
+const size_t CHUNKSIZE = 1024*1024;
 
 // linked list which is used to store the SHA256 hashes of the intermediate chunks
 struct Chunk {
 	void *digest;
-	struct Chunk *nextChunk;
+	struct Chunk *next;
 };
 
 
@@ -41,7 +41,7 @@ void* safeCalloc(size_t n, size_t size) {
 struct Chunk *allocAndInitChunk() {
 	struct Chunk *c = safeCalloc(1, sizeof(struct Chunk));
 	c->digest = safeCalloc(1, SHA256_DIGEST_LENGTH);
-	c->nextChunk = NULL;
+	c->next = NULL;
 	return c;
 }
 
@@ -49,33 +49,22 @@ struct Chunk *freeChunk(struct Chunk* c) {
 	if (c == NULL) {
 		return NULL;
 	}
-	struct Chunk *nextChunk = c->nextChunk;
+	struct Chunk *next = c->next;
 	if (c->digest != NULL) {
 		free(c->digest);
 	}
 	free(c);
 	// for convenience, return pointer to the next chunk
-	return nextChunk;
-}
-
-void printChunks(struct Chunk* startChunk) {
-	puts("----- CURRENT CHUNK LIST -----");
-	while (startChunk) {
-		printBinaryAsHex(startChunk->digest, SHA256_DIGEST_LENGTH);
-		puts("");
-		startChunk = startChunk->nextChunk;
-	}
-	puts("------------------------------");
-	puts("");
+	return next;
 }
 
 void* awsTreeHash(FILE* input)
 {
-
 	struct Chunk *startChunk = allocAndInitChunk();
 	struct Chunk *previousChunk = NULL;
 	struct Chunk *currentChunk = startChunk;
-	void *buffer = safeCalloc(1, BLOCKSIZE);
+	void *buffer = safeCalloc(1, CHUNKSIZE);
+	void *result = NULL; // return value
 
 	size_t alreadyRead = 0;
 	int n;
@@ -83,7 +72,7 @@ void* awsTreeHash(FILE* input)
 
 	SHA256_Init(&ctx);
 	// read input once and create linked list of intermediate chunk hashes
-	while( (n = fread(buffer, 1, BLOCKSIZE - alreadyRead, input)) != 0 ) {
+	while( (n = fread(buffer, 1, CHUNKSIZE - alreadyRead, input)) != 0 ) {
 		if (ferror(input)) {
 			// some kind of read error.
 			perror("error");
@@ -92,22 +81,22 @@ void* awsTreeHash(FILE* input)
 			free(buffer);
 			while ( (startChunk = freeChunk(startChunk)) != NULL) { };
 
-			return NULL;
+			return result;
 		}
 		alreadyRead += n;
 		SHA256_Update(&ctx, buffer, n);
 		if (feof(input)) {
 			break;
 		}
-		if (alreadyRead == BLOCKSIZE) {
+		if (alreadyRead == CHUNKSIZE) {
 			// current chunk is finished
 			SHA256_Final(currentChunk->digest, &ctx);
 			SHA256_Init(&ctx);
 			alreadyRead = 0;
 			// advance in linked list
 			previousChunk = currentChunk;
-			currentChunk->nextChunk = allocAndInitChunk();
-			currentChunk = currentChunk->nextChunk;
+			currentChunk->next = allocAndInitChunk();
+			currentChunk = currentChunk->next;
 		}
 	};
 	free(buffer);
@@ -116,48 +105,56 @@ void* awsTreeHash(FILE* input)
 	// we have to consider one special case
 	// if we read data with a length of exactly n * 1 MiB, the last chunk hash
 	// is the hash of an empty input and must be removed from list of chunks.
-	// it doesn't matter for empty input, though
+	// it doesn't matter there was no data at all, though
 	if (startChunk != currentChunk && alreadyRead == 0) {
 		freeChunk(currentChunk);
-		previousChunk->nextChunk = NULL;
+		previousChunk->next = NULL;
 	}
 
+	while (startChunk->next != NULL) {
+		// The chunk structs itself are reused for the new chain.
+		// we need two pointers:
+		// - currentOld points to the chunk in the "old" chain, advances 2 chunks per iteration
+		// - cuurentNew points to the chunk in the "new" chain, advances only one chunk per iteration
+		struct Chunk* currentOld = startChunk;
+		struct Chunk* currentNew = startChunk;
 
-	while (startChunk->nextChunk != NULL) { // concat chunks as long as there is only one left
-		// start a new chain which will replace the old chain later on
-		// old chain starts at "startChunk"
-		// new chain starts at "startChunkNew"
-		struct Chunk* currentChunkOld = startChunk;
-		struct Chunk* startChunkNew   = allocAndInitChunk();
-		struct Chunk* currentChunkNew = startChunkNew;
-
-		while (currentChunkOld != NULL) { // iterate through old list
-			if (currentChunkOld->nextChunk != NULL) {
-				// two or more chunks left, hash two old ones into a new one
-				SHA256_Init(&ctx);
-				SHA256_Update(&ctx, currentChunkOld->digest, SHA256_DIGEST_LENGTH);
-				currentChunkOld = freeChunk(currentChunkOld);
-				SHA256_Update(&ctx, currentChunkOld->digest, SHA256_DIGEST_LENGTH);
-				currentChunkOld = freeChunk(currentChunkOld);
-				SHA256_Final(currentChunkNew->digest, &ctx);
-				if (currentChunkOld == NULL) {
-					currentChunkNew->nextChunk = NULL;
-				} else {
-					// there is at least one more left, so we need another element in the new list
-					currentChunkNew->nextChunk = allocAndInitChunk();
-					currentChunkNew = currentChunkNew->nextChunk;
-				}
-			} else {
+		// iterate through linked list
+		while (1) {
+			if (currentOld->next == NULL) {
 				// only one chunk left, we need to copy this last one
-				memcpy(currentChunkNew->digest, currentChunkOld->digest, SHA256_DIGEST_LENGTH);
-				currentChunkNew->nextChunk = NULL;
-				currentChunkOld = freeChunk(currentChunkOld); // == NULL
+				memcpy(currentNew->digest, currentOld->digest, SHA256_DIGEST_LENGTH);
+				currentOld = currentOld->next;
+			} else {
+				// at least two chunks left, hash the next two into a new one
+				SHA256_Init(&ctx);
+				SHA256_Update(&ctx, currentOld->digest, SHA256_DIGEST_LENGTH);
+				currentOld = currentOld->next;
+				SHA256_Update(&ctx, currentOld->digest, SHA256_DIGEST_LENGTH);
+				currentOld = currentOld->next;
+				SHA256_Final(currentNew->digest, &ctx);
+			}
+			if (currentOld != NULL) {
+				// there are more than zero old chunk hashes left, we need another iteration
+				currentNew = currentNew->next;
+			} else {
+				// free chunk structs at the end which are not needed anymore
+				// because the linked list got shorter
+				currentOld = currentNew->next;
+				while ( currentOld != NULL) { currentOld = freeChunk(currentOld); };
+				currentNew->next = NULL;
+				break;
 			}
 		};
-		startChunk = startChunkNew;
+
+		// we don't need the remaining chunk structs anymore, free them!
+		currentOld = currentNew->next;	
+		while ((currentOld = freeChunk(currentOld)) != NULL) { /* nop */ };
+		currentNew->next = NULL;
 	};
 
-	void *result = safeCalloc(1, SHA256_DIGEST_LENGTH);
+	// cleanup last chunk struct and return result
+	result = safeCalloc(1, SHA256_DIGEST_LENGTH);
 	memcpy(result, startChunk->digest, SHA256_DIGEST_LENGTH);
 	freeChunk(startChunk);
 	return result;
